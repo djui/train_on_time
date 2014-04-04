@@ -5,12 +5,14 @@ from __future__ import print_function
 
 import dateutil.parser
 import json
+import pagerduty
 import sys
 import urllib2
 
 
-api_url = 'http://api.trafikinfo.trafikverket.se/v1/data.json'
-api_key = '4f280ac6b173425a9aef811c3300a725'
+trafiklab_api_url = 'http://api.trafikinfo.trafikverket.se/v1/data.json'
+trafiklab_api_key = '{{YOUR_API_KEY_HERE}}'
+pagerduty_api_key = '{{YOUR_API_KEY_HERE}}'
 
 
 def train_info(train_id, location):
@@ -19,6 +21,7 @@ def train_info(train_id, location):
                  <QUERY objecttype="TrainAnnouncement" orderby="AdvertisedTimeAtLocation">
                    <FILTER>
                      <AND>
+                       <GT name="AdvertisedTimeAtLocation" value="07:41:00" />
                        <EQ name="AdvertisedTrainIdent" value="{}" />
                        <EQ name="LocationSignature" value="{}" />
                        <EQ name="ActivityType" value="Avgang" />
@@ -26,37 +29,54 @@ def train_info(train_id, location):
                    </FILTER>
                  </QUERY>
                </REQUEST>'''
-  payload = request.format(api_key, train_id, location)
+  payload = request.format(trafiklab_api_key, train_id, location)
   headers = {'Content-Type': 'text/xml'}
-  req = urllib2.Request(api_url, payload, headers)
+  req = urllib2.Request(trafiklab_api_url, payload, headers)
   res = urllib2.urlopen(req)
   j = json.load(res)
-  return j['RESPONSE']['RESULT'][0]['TrainAnnouncement']
+  return j['RESPONSE']['RESULT'][0].get('TrainAnnouncement', None)
 
 
-def main(train_id):
-  trains = train_info(train_id)
+def main(args):
+  train_id = args[1] if len(args) > 1 else '810'
+  location = args[2] if len(args) > 2 else 'Cst'
+
+  pager = pagerduty.PagerDuty(pagerduty_api_key)
+
+  trains = train_info(train_id, location)
+
+  if not trains:
+    msg = 'No train information could be found!'
+    ## For now assume that if no info could be found, that it's either:
+    ##   (a) maintenance windowo night
+    ##   (b) weekend.
+    # pager.trigger(msg)
+    print('\033[1;31m' + msg + '\033[0m')
+    sys.exit(2)
+
   for train in trains:
-    if          train['TypeOfTraffic']     == u'Tåg'   and \
-                train['ActivityType']      == 'Avgang' and \
-                train['LocationSignature'] == 'Cst'    and \
-       'Cst' in train['FromLocation']                  and \
-         'U' in train['ToLocation']:
-      #departure_time = train['ScheduledDepartureDateTime']
-      #arrival_time = train['AdvertisedTimeAtLocation']
-      advertised_departure_time = dateutil.parser.parse(train['AdvertisedTimeAtLocation'])
-      #estimated_departure_time = dateutil.parser.parse(train['EstimatedTimeAtLocation'])
-      #is_preliminary = train['EstimatedTimeIsPreliminary']
-      is_canceled = train['Canceled']
-      track = train['TrackAtLocation']
+    track           = train['TrackAtLocation']
+    is_canceled     = train['Canceled']
+    advertised_time = dateutil.parser.parse(train['AdvertisedTimeAtLocation'])
+    estimated_time  = dateutil.parser.parse(train['EstimatedTimeAtLocation']) if 'EstimatedTimeAtLocation' in train else None
+    is_late         = True if estimated_time else False
 
-      if is_canceled:
-        print(';-( Jenny, your train {} is canceled!'.format(train_id))
-      else:
-        print(':-) Jenny, your train {} is leaving at {} from spår {}.'.format(train_id, advertised_departure_time, track))
+    if is_canceled:
+      msg = 'Train {} is canceled!'.format(msg, train_id)
+      pager.trigger(msg)
+      print('\033[1;31m' + msg + '\033[0m')
+      sys.exit(1)
+    elif is_late:
+      msg = 'Train {} is scheduled late for {} at spår {}.'.format(train_id, estimated_time.strftime('%H:%M'), track)
+      pager.trigger(msg)
+      print('\033[1;33m' + msg + '\033[0m')
+      sys.exit(1)
+    else:
+      msg = 'Train {} is scheduled on time for {} at spår {}.'.format(train_id, advertised_time.strftime('%H:%M'), track)
+      #pager.trigger(msg)
+      print('\033[1;32m' + msg + '\033[0m')
+      sys.exit(0)
 
 
 if __name__ == '__main__':
-  train_id = sys.argv[1] if len(sys.argv) > 1 else '810'
-  train_id = sys.argv[2] if len(sys.argv) > 2 else 'Cst'
-  main(train_id)
+  main(sys.argv)
